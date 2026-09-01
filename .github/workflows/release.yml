@@ -1,0 +1,136 @@
+name: Release
+
+# Publishes an immutable, checksummed release for every `v*` tag: a plugin
+# archive that extracts straight into ~/.config/omarchy/plugins/, a SHA256SUMS
+# file, and a Sigstore build-provenance attestation for each asset.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag to (re)build a release for, e.g. v1.0.0'
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    name: package + publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Validate the plugin before publishing it
+        run: ./scripts/validate-plugin.sh .
+
+      - name: Resolve version
+        id: ver
+        run: |
+          tag="${{ inputs.tag || github.ref_name }}"
+          version="${tag#v}"
+          manifest_version="$(jq -r '.version' manifest.json)"
+          if [[ "$version" != "$manifest_version" ]]; then
+            echo "::error::tag $tag implies version $version but manifest.json says $manifest_version" >&2
+            exit 1
+          fi
+          {
+            echo "tag=$tag"
+            echo "version=$version"
+            echo "id=$(jq -r '.id' manifest.json)"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Build the plugin archives
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+          PLUGIN_ID: ${{ steps.ver.outputs.id }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist "build/$PLUGIN_ID"
+          # The archive root is the plugin id, so extracting it into
+          # ~/.config/omarchy/plugins/ lands the plugin in the right place.
+          cp manifest.json Panel.qml README.md LICENSE preview.png "build/$PLUGIN_ID/"
+          name="omarchy-obsbot-tiny3-${VERSION}"
+          tar -C build --owner=0 --group=0 --numeric-owner \
+              -czf "dist/${name}.tar.gz" "$PLUGIN_ID"
+          ( cd build && zip -qr "../dist/${name}.zip" "$PLUGIN_ID" )
+
+      - name: Generate SHA256SUMS
+        run: |
+          ( cd dist && sha256sum -- * | sort -k2 > SHA256SUMS.tmp && mv SHA256SUMS.tmp SHA256SUMS )
+          cat dist/SHA256SUMS
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/SHA256SUMS
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.ver.outputs.tag }}
+          VERSION: ${{ steps.ver.outputs.version }}
+          PLUGIN_ID: ${{ steps.ver.outputs.id }}
+        run: |
+          set -euo pipefail
+          notes=$(mktemp)
+          {
+            echo "## Install"
+            echo
+            echo "From the Omarchy plugin marketplace:"
+            echo
+            echo '```bash'
+            echo "omarchy plugin install ${PLUGIN_ID}"
+            echo '```'
+            echo
+            echo "Or install this exact release by hand, checksum first:"
+            echo
+            echo '```bash'
+            echo "REL=https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}"
+            echo "curl -fLO \"\$REL/omarchy-obsbot-tiny3-${VERSION}.tar.gz\""
+            echo "curl -fLO \"\$REL/SHA256SUMS\""
+            echo 'sha256sum --check --ignore-missing SHA256SUMS'
+            echo
+            echo 'mkdir -p ~/.config/omarchy/plugins'
+            echo "tar xzf omarchy-obsbot-tiny3-${VERSION}.tar.gz -C ~/.config/omarchy/plugins/"
+            echo "omarchy plugin enable ${PLUGIN_ID}"
+            echo 'omarchy restart shell'
+            echo '```'
+            echo
+            echo 'Both assets also carry a [Sigstore build-provenance attestation](https://docs.github.com/actions/security-guides/using-artifact-attestations):'
+            echo
+            echo '```bash'
+            echo "gh attestation verify omarchy-obsbot-tiny3-${VERSION}.tar.gz --repo ${GITHUB_REPOSITORY}"
+            echo '```'
+            echo
+            echo "## Requires"
+            echo
+            echo "The [obsbot-tiny3-linux](https://github.com/joshualambert/obsbot-tiny3-linux/releases) CLI"
+            echo "(\`t3ctl\` / \`t3-preview\`) on your \`PATH\`, plus \`mpv\` for the live preview."
+            echo
+            echo '## Checksums'
+            echo
+            echo '```'
+            cat dist/SHA256SUMS
+            echo '```'
+          } > "$notes"
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/* --clobber
+            gh release edit "$TAG" --notes-file "$notes"
+          else
+            gh release create "$TAG" dist/* \
+              --title "OBSBOT Tiny 3 widget $TAG" \
+              --notes-file "$notes" \
+              --verify-tag
+          fi

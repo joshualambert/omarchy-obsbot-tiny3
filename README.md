@@ -22,10 +22,27 @@ streams the camera — which is released the moment the preview window closes.
 ## Requirements
 
 This widget is a front-end for the **obsbot-tiny3-linux** CLI. Install that
-project **first** by following its own instructions, then make sure the `t3ctl`
-and `t3-preview` commands it provides are on your `PATH`:
+project **first** from one of its
+[tagged releases](https://github.com/joshualambert/obsbot-tiny3-linux/releases)
+— every release ships checksummed, provenance-attested binaries and `.deb` /
+`.rpm` / Arch packages, so you can verify what you install rather than building
+whatever is on `main`:
 
-- Project & install guide: <https://github.com/joshualambert/obsbot-tiny3-linux>
+```bash
+VER=0.1.0
+REL=https://github.com/joshualambert/obsbot-tiny3-linux/releases/download/v$VER
+
+curl -fLO "$REL/obsbot-tiny3-linux-$VER-x86_64-linux-musl.tar.gz"
+curl -fLO "$REL/SHA256SUMS"
+sha256sum --check --ignore-missing SHA256SUMS      # must print: OK
+
+tar xzf "obsbot-tiny3-linux-$VER-x86_64-linux-musl.tar.gz"
+cd "obsbot-tiny3-linux-$VER-x86_64-linux-musl" && ./install.sh
+```
+
+Afterwards the `t3ctl` and `t3-preview` commands it provides must be on your
+`PATH`. See that project's README for the `.deb`/`.rpm`/Arch package routes and
+for `gh attestation verify`.
 
 The live preview additionally uses [`mpv`](https://mpv.io/) (install it with your
 distribution's package manager). This widget itself installs nothing, runs no
@@ -40,8 +57,35 @@ From the Omarchy plugin marketplace:
 omarchy plugin install io.github.joshualambert.obsbot-tiny3
 ```
 
-Then add the widget to your bar — put this entry in the `right` (or `left` /
-`center`) list under `bar.layout` in `~/.config/omarchy/shell.json`:
+### Or install a pinned release by hand
+
+Every `v*` tag publishes an archive plus a `SHA256SUMS` file and a
+[Sigstore build-provenance attestation](https://docs.github.com/actions/security-guides/using-artifact-attestations)
+— see [**Releases**](https://github.com/joshualambert/omarchy-obsbot-tiny3/releases).
+The archive's root directory is the plugin id, so it extracts straight into your
+plugins folder:
+
+```bash
+VER=1.0.0
+REL=https://github.com/joshualambert/omarchy-obsbot-tiny3/releases/download/v$VER
+
+curl -fLO "$REL/omarchy-obsbot-tiny3-$VER.tar.gz"
+curl -fLO "$REL/SHA256SUMS"
+sha256sum --check --ignore-missing SHA256SUMS      # must print: OK
+
+# optional: prove the archive came from this repo's release workflow
+gh attestation verify "omarchy-obsbot-tiny3-$VER.tar.gz" \
+  --repo joshualambert/omarchy-obsbot-tiny3
+
+mkdir -p ~/.config/omarchy/plugins
+tar xzf "omarchy-obsbot-tiny3-$VER.tar.gz" -C ~/.config/omarchy/plugins/
+omarchy plugin enable io.github.joshualambert.obsbot-tiny3
+```
+
+### Add it to your bar
+
+Put this entry in the `right` (or `left` / `center`) list under `bar.layout` in
+`~/.config/omarchy/shell.json`:
 
 ```json
 { "id": "io.github.joshualambert.obsbot-tiny3" }
@@ -65,6 +109,13 @@ omarchy restart shell
 ```
 
 The widget writes no configuration of its own and never modifies your files.
+
+## Development
+
+`./scripts/validate-plugin.sh .` runs the same manifest checks the Omarchy shell
+enforces before it will load a plugin; CI runs it on every push, and the release
+workflow runs it again before publishing. Releasing is documented in
+[`RELEASING.md`](RELEASING.md).
 
 ## License
 
