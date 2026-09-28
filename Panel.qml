@@ -4,15 +4,7 @@ import Quickshell.Io
 import qs.Commons
 import qs.Ui
 
-// OBSBOT Tiny 3 bar widget: a camera icon in the bar that opens a control popup
-// (sleep/wake, AI tracking, white balance, HDR, recenter) plus a live preview.
-//
-// Design note on the camera-sleep goal: the bar icon reflects only the cheap,
-// non-invasive USB power state (t3ctl power reads sysfs, opens nothing). The
-// full status (t3ctl status) is read on popup-open and after each action — a
-// control read that does not wake a sleeping camera. The live preview STREAMS
-// the camera (which wakes it) and runs in its own window, so it is on-demand
-// and releases the camera the moment it is closed.
+// Confirmed camera state; persistent intent is enforced by t3-wb-guard.
 Panel {
   id: root
   moduleName: "io.github.joshualambert.obsbot-tiny3"
@@ -24,6 +16,11 @@ Panel {
   property bool present: true
 
   // Full state, refreshed on open + after actions (control read; no wake).
+  property bool stateValid: false
+  property string actionError: ""
+  property string powerPolicy: "auto"
+  property bool guardActive: false
+  readonly property bool busy: actionProc.running || statusProc.running
   property bool asleep: false
   property string tracking: "off"
   property bool autoWb: true
@@ -61,6 +58,8 @@ Panel {
     property color fg: "white"
     property string fam: Style.font.family
     signal switched()
+    enabled: root.stateValid && !root.busy
+    opacity: root.stateValid ? 1 : 0.5
     width: parent ? parent.width : Style.space(300)
     implicitHeight: Math.max(labelCol.implicitHeight, sw.implicitHeight) + Style.space(12)
     Column {
@@ -99,12 +98,17 @@ Panel {
 
   // --- data plumbing ---
 
-  function refreshPower() { if (!powerProc.running) powerProc.running = true }
-  function refreshStatus() { if (!statusProc.running) statusProc.running = true }
+  function refreshPower() {
+    if (!powerProc.running) powerProc.running = true
+    if (!guardProc.running) guardProc.running = true
+  }
+  function refreshStatus() { if (!statusProc.running && !actionProc.running) statusProc.running = true }
 
   function act(args) {
-    Quickshell.execDetached(["t3ctl"].concat(args))
-    afterAction.restart()
+    if (root.busy) return
+    root.actionError = ""
+    actionProc.command = ["t3ctl"].concat(args)
+    actionProc.running = true
   }
 
   function preview() { Quickshell.execDetached(["t3-preview", root.previewRes]) }
@@ -118,7 +122,21 @@ Panel {
   Component.onCompleted: refreshPower()
 
   Timer { interval: 8000; running: true; repeat: true; onTriggered: root.refreshPower() }
-  Timer { id: afterAction; interval: 700; onTriggered: { root.refreshStatus(); root.refreshPower() } }
+  Timer { interval: 1000; running: root.opened; repeat: true; onTriggered: root.refreshStatus() }
+  Process {
+    id: actionProc
+    stderr: StdioCollector { id: actionStderr; waitForEnd: true }
+    onExited: function(code, status) {
+      if (code !== 0 || status !== 0) root.actionError = actionStderr.text.trim() || "Camera command failed"
+      root.refreshStatus()
+      root.refreshPower()
+    }
+  }
+  Process {
+    id: guardProc
+    command: ["systemctl", "--user", "is-active", "t3-wb-guard.service"]
+    onExited: function(code, status) { root.guardActive = code === 0 && status === 0 }
+  }
   // Rotate the tagline only while the popup is open.
   Timer {
     interval: 3200
@@ -139,6 +157,7 @@ Panel {
           root.present = true
         } catch (e) {
           root.present = false
+          root.stateValid = false
         }
       }
     }
@@ -152,18 +171,18 @@ Panel {
       onStreamFinished: {
         try {
           var j = JSON.parse(text)
-          // NB: we deliberately do NOT reconcile `asleep` from the readback.
-          // Reading the sleep bit means opening the device, which disturbs the
-          // very state we're reading, so it's unreliable — the Awake switch is
-          // driven optimistically from the user's action instead. The other
-          // fields are reliable (unaffected by the read).
+          if (typeof j.asleep !== "boolean" || typeof j.tracking !== "string"
+              || typeof j.hdr !== "boolean" || typeof j.auto_wb !== "boolean") throw new Error("Incomplete status")
+          root.asleep = j.asleep
+          root.powerPolicy = j.power_policy || "auto"
+          root.stateValid = true
           root.tracking = String(j.tracking || "off")
           root.autoWb = j.auto_wb === true
           root.wbTemp = j.wb_temp | 0
           root.hdr = j.hdr === true
           root.present = true
         } catch (e) {
-          // leave last-known values
+          root.stateValid = false
         }
       }
     }
@@ -271,7 +290,7 @@ Panel {
           font.family: root.bar ? root.bar.fontFamily : Style.font.family
           font.pixelSize: Style.font.caption
           wrapMode: Text.WordWrap
-          text: root.present
+          text: !root.stateValid ? "Camera state unavailable" : root.present
             ? ((root.asleep ? "Asleep" : "Awake")
                + " · tracking " + root.tracking
                + " · WB " + (root.autoWb ? "auto" : (root.wbTemp + "K"))
@@ -281,9 +300,21 @@ Panel {
 
         PanelSeparator { foreground: root.fg }
 
-        // Optimistic switches: flip the local state on click for instant
-        // feedback, then send the command. Sleep uses explicit sleep/wake
-        // (not toggle) so its direction never depends on an unreliable readback.
+        Text {
+          width: parent.width
+          visible: root.actionError !== ""
+          text: root.actionError
+          color: Color.accent
+          wrapMode: Text.WordWrap
+          font.pixelSize: Style.font.caption
+        }
+        Text {
+          width: parent.width
+          text: root.busy ? "Checking camera…" : "Power: " + root.powerPolicy + (root.guardActive ? " · guard active" : " · guard not running")
+          color: root.fg
+          font.pixelSize: Style.font.caption
+        }
+        // Switches show confirmed hardware state; serialize actions and surface errors.
         SwitchRow {
           width: parent.width
           label: "Awake"
@@ -292,8 +323,7 @@ Panel {
           fg: root.fg
           fam: root.bar ? root.bar.fontFamily : Style.font.family
           onSwitched: {
-            if (root.asleep) { root.asleep = false; root.act(["wake"]) }
-            else { root.asleep = true; root.act(["sleep"]) }
+            root.act([root.asleep ? "wake" : "sleep"])
           }
         }
         SwitchRow {
@@ -304,7 +334,6 @@ Panel {
           fam: root.bar ? root.bar.fontFamily : Style.font.family
           onSwitched: {
             var on = root.tracking === "off"
-            root.tracking = on ? "normal" : "off"
             root.act(["track", on ? "on" : "off"])
           }
         }
@@ -315,8 +344,7 @@ Panel {
           fg: root.fg
           fam: root.bar ? root.bar.fontFamily : Style.font.family
           onSwitched: {
-            root.hdr = !root.hdr
-            root.act(["hdr", root.hdr ? "on" : "off"])
+            root.act(["hdr", root.hdr ? "off" : "on"])
           }
         }
         SwitchRow {
@@ -327,12 +355,19 @@ Panel {
           fg: root.fg
           fam: root.bar ? root.bar.fontFamily : Style.font.family
           onSwitched: {
-            root.autoWb = !root.autoWb
-            root.act(["wb", root.autoWb ? "auto" : "pin"])
+            root.act(["wb", root.autoWb ? "pin" : "auto"])
           }
         }
 
         PanelSeparator { foreground: root.fg }
+
+        Button {
+          width: parent.width
+          foreground: root.fg
+          text: "Wake automatically for calls"
+          enabled: !root.busy
+          onClicked: root.act(["auto"])
+        }
 
         Dropdown {
           width: parent.width
