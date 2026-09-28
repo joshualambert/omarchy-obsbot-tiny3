@@ -15,9 +15,22 @@ live video preview.
   balance; a preview-resolution dropdown (720p/1080p/2160p); recenter; and a
   **Live preview** button.
 
-The widget respects the camera's ability to sleep: it reads only the cheap USB
-power state in the background (nothing is opened), and only the live preview
-streams the camera — which is released the moment the preview window closes.
+The popup polls real camera state once per second while open. Switches reflect
+confirmed readback, including Sleep, rather than an optimistic local value.
+Commands run serially, wait for completion and surface failures in the popup.
+Unavailable state disables the switches. The popup also reports whether the
+settings guard is running.
+
+Awake selects persistent keep-awake mode; Sleep remains authoritative even
+during calls. **Wake automatically for calls** selects automatic wake for video
+or microphone use. Saved tracking, HDR and white-balance choices are enforced
+by the companion driver guard. Closing preview does not release an explicit
+keep-awake choice; use Sleep or automatic mode.
+
+These additions require the matching persistent-settings update to
+`obsbot-tiny3-linux` (not the older v0.1.0 release). Install both updates together.
+The source still works without the optional processed microphone service;
+for call audio setup, see the driver's README.
 
 ## Requirements
 
